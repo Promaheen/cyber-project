@@ -18,6 +18,11 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# Clear stale iptables rules from previous sessions
+echo -e "${GREEN}[*] Clearing stale iptables block rules...${NC}"
+sudo iptables -F INPUT 2>/dev/null
+sudo ip6tables -F INPUT 2>/dev/null
+
 # Function to kill all processes on exit
 cleanup() {
     echo -e "\n${RED}[!] Shutting down system...${NC}"

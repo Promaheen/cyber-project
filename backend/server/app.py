@@ -34,7 +34,7 @@ def health_check():
 @app.route('/api/events', methods=['GET'])
 def get_events():
     conn = get_db_connection()
-    events = conn.execute('SELECT * FROM events ORDER BY timestamp DESC LIMIT 100').fetchall()
+    events = conn.execute('SELECT * FROM events ORDER BY id DESC LIMIT 100').fetchall()
     conn.close()
     return jsonify([dict(ix) for ix in events])
 
@@ -58,9 +58,10 @@ def unblock_ip():
         # 1. Remove from blocked_ips visual list
         conn.execute('DELETE FROM blocked_ips WHERE ip_address = ?', (ip,))
         
-        # 2. Queue command for Agent
-        conn.execute('INSERT INTO agent_commands (agent_id, command, params, status) VALUES (?, ?, ?, ?)',
-                     (agent_id, 'UNBLOCK_IP', ip, 'pending'))
+        # 2. Queue command for ALL agents that might have blocked this IP
+        for agent in ["Log Agent", "Network Agent"]:
+            conn.execute('INSERT INTO agent_commands (agent_id, command, params, status) VALUES (?, ?, ?, ?)',
+                         (agent, 'UNBLOCK_IP', ip, 'pending'))
         
         conn.commit()
         conn.close()
@@ -156,12 +157,10 @@ def receive_event():
         except Exception as e:
             print(f"Error storing blocked IP: {e}")
 
-    # Handle IP Unblock Event (Auto-cooldown)
     elif event_type == "ip_unblocked":
         ip = details.get('ip')
-        reason = details.get('reason')
         severity = "info"
-        message = f"RESOLVED: IP {ip} unblocked. Reason: {reason}"
+        message = f"✅ IP {ip} Unblocked — Cooldown Expired"
         
         # Remove from Blocked List
         try:
@@ -176,30 +175,77 @@ def receive_event():
     elif event_type == "network_alert":
          severity = details.get('severity', 'info')
          message = details.get('message', 'Network Alert')
-         source_ip = details.get('source_ip')
-         if source_ip:
-             message += f" [Source: {source_ip}]"
 
-    # AI Analysis for Login Attempts
+    # Handle DDoS / Flood alerts (progressive events from Network Agent)
+    elif event_type == "ddos_alert":
+        ip = details.get('ip', 'Unknown')
+        count = details.get('count', 0)
+        threshold = details.get('threshold', 100)
+        attack_type = details.get('attack_type', 'DDoS')
+        is_critical = details.get('is_critical', False)
+
+        progress_ratio = count / threshold if threshold > 0 else 0
+
+        if is_critical or progress_ratio >= 1.0:
+            severity = "critical"
+        elif progress_ratio >= 0.6:
+            severity = "warning"
+        else:
+            severity = "low"
+
+        message = f"{attack_type}: {count}/{threshold} pkt/sec from {ip}"
+
+        if is_critical:
+            message += " [FLOOD DETECTED]"
+        elif progress_ratio >= 0.6:
+            message += " [Escalating]"
+
+    # Per-attempt login event (new format — one event per failed login)
+    elif event_type == "login_attempt":
+        ip = details.get('ip', 'Unknown')
+        count = details.get('count', 0)
+        threshold = details.get('threshold', 5)
+        is_critical = details.get('is_critical', False)
+
+        progress_ratio = count / threshold if threshold > 0 else 0
+
+        if is_critical or progress_ratio >= 1.0:
+            severity = "critical"
+        elif progress_ratio >= 0.6:
+            severity = "warning"
+        else:
+            severity = "low"
+
+        message = f"Failed Login: {count}/{threshold} attempts from {ip}"
+
+        if is_critical:
+            message += " [High Velocity — Brute Force]"
+        elif progress_ratio >= 1.0:
+            message += " [Threshold Reached]"
+        elif progress_ratio >= 0.6:
+            message += " [Escalating]"
+
+    # Legacy batched login stats (backwards compatibility)
     elif event_type == "login_attempt_stats":
         failed_attempts = details.get('failed_attempts', 0)
         is_critical = details.get('is_critical', False)
-        
         message = f"Detected {failed_attempts} Failed Login Attempts"
-        
         if is_critical:
-             if failed_attempts >= 5:
-                 severity = "critical"
-             else:
-                 severity = "warning"
-             message += " [High Velocity]"
+            severity = "critical"
+            message += " [High Velocity]"
         elif failed_attempts >= 5:
-             severity = "critical"
-             message += " [AI THREAT]"
+            severity = "critical"
         elif failed_attempts >= 3:
-             severity = "warning"
+            severity = "warning"
         else:
-             severity = "low"
+            severity = "low"
+
+    # Handle Suspicious Login (successful login after failures)
+    elif event_type == "suspicious_login":
+        ip = details.get('ip', 'Unknown')
+        reason = details.get('reason', '')
+        severity = "critical"
+        message = f"⚠ SUSPICIOUS LOGIN from {ip} — {reason}"
 
 
     # Store in Database

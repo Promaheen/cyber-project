@@ -16,7 +16,59 @@ const EventLog = ({ events, selectedAgent }) => {
     };
 
     const formatMessage = (msg, severity) => {
-        // Regex to extract key info: Supports both old "reported <N>" and new "Detected <N>" formats
+        // New format: "Failed Login: 3/5 attempts from 10.134.225.98 [Escalating]"
+        const progressMatch = msg.match(/Failed Login:\s+(\d+)\/(\d+)\s+attempts from\s+([\d.]+(?::[\w]+)?)\s*(?:\[(.+?)\])?/);
+
+        if (progressMatch) {
+            const count = parseInt(progressMatch[1]);
+            const threshold = parseInt(progressMatch[2]);
+            const ip = progressMatch[3];
+            const tag = progressMatch[4] || '';
+            const progress = Math.min((count / threshold) * 100, 100);
+
+            const barColor = severity === 'critical' ? 'var(--status-danger)' :
+                severity === 'warning' ? 'var(--status-warning)' : 'var(--neon-primary)';
+
+            return (
+                <span style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                    <span style={{
+                        background: 'rgba(255,255,255,0.05)',
+                        padding: '2px 8px',
+                        borderRadius: '4px',
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: '0.85em',
+                        border: '1px solid rgba(255,255,255,0.1)'
+                    }}>{ip}</span>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: '120px' }}>
+                        <span style={{
+                            width: '60px', height: '6px', borderRadius: '3px',
+                            background: 'rgba(255,255,255,0.1)', display: 'inline-block', position: 'relative', overflow: 'hidden'
+                        }}>
+                            <span style={{
+                                width: `${progress}%`, height: '100%', borderRadius: '3px',
+                                background: barColor, display: 'block',
+                                transition: 'width 0.3s ease'
+                            }} />
+                        </span>
+                        <strong style={{
+                            color: barColor,
+                            fontSize: '1.05em',
+                            fontFamily: 'var(--font-mono)'
+                        }}>{count}/{threshold}</strong>
+                    </span>
+                    {tag && <span style={{
+                        fontSize: '0.75em',
+                        background: severity === 'critical' ? 'var(--status-danger)' : 'rgba(255,165,0,0.2)',
+                        color: severity === 'critical' ? 'white' : 'var(--status-warning)',
+                        padding: '2px 6px',
+                        borderRadius: '4px',
+                        fontWeight: 600
+                    }}>{tag}</span>}
+                </span>
+            );
+        }
+
+        // Legacy format: "Detected N Failed Login Attempts"
         const loginMatch = msg.match(/(?:reported|Detected)\s+(\d+)\s+(?:failed login attempts|Failed Login Attempts)/i);
 
         if (loginMatch) {
@@ -35,17 +87,70 @@ const EventLog = ({ events, selectedAgent }) => {
             );
         }
 
+        // Suspicious login
+        if (msg.includes("SUSPICIOUS LOGIN")) {
+            return <span style={{ color: 'var(--status-danger)', fontWeight: 600 }}>{msg}</span>;
+        }
+
+        // DDoS / Flood format: "SYN Flood: 60/50 pkt/sec from 10.x.x.x [FLOOD DETECTED]"
+        const ddosMatch = msg.match(/(.+?):\s+(\d+)\/(\d+)\s+pkt\/sec from\s+([\d.]+(?::[\w]+)?)\s*(?:\[(.+?)\])?/);
+        if (ddosMatch) {
+            const attackType = ddosMatch[1];
+            const count = parseInt(ddosMatch[2]);
+            const threshold = parseInt(ddosMatch[3]);
+            const ip = ddosMatch[4];
+            const tag = ddosMatch[5] || '';
+            const progress = Math.min((count / threshold) * 100, 100);
+
+            const barColor = severity === 'critical' ? 'var(--status-danger)' :
+                severity === 'warning' ? 'var(--status-warning)' : 'var(--neon-primary)';
+
+            return (
+                <span style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                    <span style={{
+                        fontSize: '0.8em', fontWeight: 600,
+                        background: 'rgba(255,100,100,0.15)', color: 'var(--status-danger)',
+                        padding: '2px 6px', borderRadius: '4px'
+                    }}>{attackType}</span>
+                    <span style={{
+                        background: 'rgba(255,255,255,0.05)', padding: '2px 8px', borderRadius: '4px',
+                        fontFamily: 'var(--font-mono)', fontSize: '0.85em',
+                        border: '1px solid rgba(255,255,255,0.1)'
+                    }}>{ip}</span>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: '120px' }}>
+                        <span style={{
+                            width: '60px', height: '6px', borderRadius: '3px',
+                            background: 'rgba(255,255,255,0.1)', display: 'inline-block', overflow: 'hidden'
+                        }}>
+                            <span style={{
+                                width: `${progress}%`, height: '100%', borderRadius: '3px',
+                                background: barColor, display: 'block', transition: 'width 0.3s ease'
+                            }} />
+                        </span>
+                        <strong style={{ color: barColor, fontFamily: 'var(--font-mono)', fontSize: '1.05em' }}>
+                            {count}/{threshold}
+                        </strong>
+                        <span style={{ fontSize: '0.7em', color: 'var(--text-muted)' }}>pkt/s</span>
+                    </span>
+                    {tag && <span style={{
+                        fontSize: '0.75em', fontWeight: 600, padding: '2px 6px', borderRadius: '4px',
+                        background: severity === 'critical' ? 'var(--status-danger)' : 'rgba(255,165,0,0.2)',
+                        color: severity === 'critical' ? 'white' : 'var(--status-warning)'
+                    }}>{tag}</span>}
+                </span>
+            );
+        }
+
         return msg;
     };
 
     // Filter out "System Check: Normal" (0 failures)
     const filteredEvents = events.filter(event => {
-        // Match both old and new formats
         const loginMatch = event.message.match(/(?:reported|Detected)\s+(\d+)\s+(?:failed login attempts|Failed Login Attempts)/i);
         if (loginMatch) {
             return parseInt(loginMatch[1]) > 0;
         }
-        return true; // Keep other types of events
+        return true;
     });
 
     const handleClearEvents = async () => {

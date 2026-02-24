@@ -58,6 +58,9 @@ def _detect_own_ips():
         pass
     logger.info(f"Protected IPs (will never be blocked): {PROTECTED_IPS}")
 
+# --- Blocked IPs (skip further processing until unblocked) ---
+blocked_ips = set()
+
 _detect_own_ips()
 
 
@@ -142,7 +145,9 @@ def block_ip(ip_address):
 
         if check.returncode != 0:
             subprocess.run(["iptables", "-A", "INPUT", "-s", ip_address, "-j", "DROP"], check=True)
-            return True
+        else:
+            logger.info(f"IP {ip_address} is already blocked in iptables.")
+        return True  # IP is blocked (either newly or already)
     except Exception as e:
         logger.error(f"Error blocking IP: {e}")
     return False
@@ -164,32 +169,39 @@ def send_block_event(ip, reason):
         logger.error(f"Error sending block event: {e}")
 
 
-def send_data(failed_count, is_critical=False):
-    # Send heartbeat if 0 failures so backend registers agent as active
-    event_type = "heartbeat" if failed_count == 0 else "login_attempt_stats"
-
+def send_heartbeat():
+    """Send a heartbeat so the server knows this agent is alive."""
     try:
         payload = {
             "agent_id": AGENT_ID,
-            "event_type": event_type,
+            "event_type": "heartbeat",
             "details": {
-                "failed_attempts": failed_count,
-                "is_critical": is_critical,
                 "cpu_percent": psutil.cpu_percent(),
                 "memory_percent": psutil.virtual_memory().percent
             }
         }
-
-        if failed_count > 0:
-            msg = f"Reporting {failed_count} failures..."
-            if is_critical:
-                msg += " [CRITICAL THREAT]"
-            logger.warning(msg)
-
         _request_with_retry('post', SERVER_URL, json=payload)
-
     except Exception as e:
-        logger.error(f"Error sending data to server: {e}")
+        logger.error(f"Error sending heartbeat: {e}")
+
+
+def send_failed_login_event(ip, count, is_critical=False):
+    """Send an immediate event for a single failed login attempt with per-IP progress."""
+    try:
+        payload = {
+            "agent_id": AGENT_ID,
+            "event_type": "login_attempt",
+            "details": {
+                "ip": ip,
+                "count": count,
+                "threshold": BRUTE_FORCE_THRESHOLD,
+                "is_critical": is_critical
+            }
+        }
+        logger.warning(f"Failed login {count}/{BRUTE_FORCE_THRESHOLD} from {ip}" + (" [HIGH VELOCITY]" if is_critical else ""))
+        _request_with_retry('post', SERVER_URL, json=payload)
+    except Exception as e:
+        logger.error(f"Error sending login event: {e}")
 
 
 def unblock_ip(ip_address):
@@ -226,6 +238,7 @@ def check_commands():
                 if cmd['command'] == 'UNBLOCK_IP':
                     ip = cmd['params']
                     unblock_ip(ip)
+                    blocked_ips.discard(ip)  # Allow re-detection
     except Exception as e:
         logger.error(f"Error checking commands: {e}")
 
@@ -264,11 +277,9 @@ def monitor_ssh_logs():
         logger.critical(f"Cannot read {LOG_FILE}. Please run with sudo.")
         return
 
-    failed_attempts_buffer = 0
-    buffer_start_time = 0
     ip_tracker = {}            # Track failures per IP: {ip: [count, first_seen_time]}
     failed_ips = set()          # IPs that have had failed attempts (for suspicious login detection)
-    last_sent_time = time.time()
+    last_heartbeat = time.time()
     last_cmd_check = time.time()
 
     try:
@@ -282,31 +293,6 @@ def monitor_ssh_logs():
                 # --- Periodic IP tracker cleanup (runs every iteration) ---
                 _cleanup_ip_tracker(ip_tracker, current_time)
 
-                # --- Velocity / Critical Threat Calculation ---
-                is_critical = False
-                if failed_attempts_buffer > 0 and failed_attempts_buffer >= 2 and buffer_start_time > 0:
-                    duration = current_time - buffer_start_time
-                    if duration < 0.1:
-                        duration = 0.1
-                    rate = failed_attempts_buffer / duration
-                    if rate > CRITICAL_RATE:
-                        is_critical = True
-
-                # --- Send Logic ---
-                should_send = False
-                if failed_attempts_buffer > 0:
-                    if current_time - last_sent_time >= FAILURE_SEND_INTERVAL:
-                        should_send = True
-                else:
-                    if current_time - last_sent_time >= HEARTBEAT_INTERVAL:
-                        should_send = True
-
-                if should_send:
-                    send_data(failed_attempts_buffer, is_critical)
-                    failed_attempts_buffer = 0
-                    buffer_start_time = 0
-                    last_sent_time = current_time
-
                 # --- Check for server commands periodically ---
                 if current_time - last_cmd_check >= 5:
                     check_commands()
@@ -314,12 +300,17 @@ def monitor_ssh_logs():
 
                 if line is None:
                     # Heartbeat when idle
-                    if current_time - last_sent_time >= HEARTBEAT_INTERVAL:
-                        send_data(0, False)
-                        last_sent_time = current_time
+                    if current_time - last_heartbeat >= HEARTBEAT_INTERVAL:
+                        send_heartbeat()
+                        last_heartbeat = current_time
                     continue
 
                 line = line.strip()
+
+                # --- Heartbeat during active log flow ---
+                if current_time - last_heartbeat >= HEARTBEAT_INTERVAL:
+                    send_heartbeat()
+                    last_heartbeat = current_time
 
                 # --- NMAP / SCANNER DETECTION ---
                 if "Did not receive identification string" in line or "Bad protocol version identification" in line:
@@ -338,7 +329,7 @@ def monitor_ssh_logs():
                         ip = ip_match.group(1)
                         if ip in failed_ips:
                             send_suspicious_login_event(ip)
-                            failed_ips.discard(ip)  # Reset after alerting
+                            failed_ips.discard(ip)
                     continue
 
                 # --- HYDRA / BRUTE FORCE DETECTION ---
@@ -356,36 +347,50 @@ def monitor_ssh_logs():
                             logger.warning(f"Extracted invalid IP, skipping: {ip}")
                             continue
 
+                        # Skip if this IP is already blocked
+                        if ip in blocked_ips:
+                            continue
+
                         # Track this IP for suspicious-login detection
                         failed_ips.add(ip)
 
-                        # Velocity Check (Hydra Detection)
+                        # Update per-IP tracker
                         if ip not in ip_tracker or not isinstance(ip_tracker[ip], list):
                             ip_tracker[ip] = [0, current_time]
 
                         count_data = ip_tracker[ip]
-                        # Reset window if expired
                         if current_time - count_data[1] > TIME_WINDOW_SECONDS:
                             count_data = [0, current_time]
 
                         count_data[0] += 1
                         ip_tracker[ip] = count_data
 
-                        if failed_attempts_buffer == 0:
-                            buffer_start_time = time.time()
+                        # Velocity check for high-speed attacks
+                        is_critical = False
+                        if count_data[0] >= 2:
+                            duration = current_time - count_data[1]
+                            if duration < 0.1:
+                                duration = 0.1
+                            rate = count_data[0] / duration
+                            if rate > CRITICAL_RATE:
+                                is_critical = True
 
-                        failed_attempts_buffer += 1
+                        # --- SEND IMMEDIATELY for each failed attempt ---
+                        send_failed_login_event(ip, count_data[0], is_critical)
 
                         # TRIGGER BLOCK if threshold met
-                        if count_data[0] >= BRUTE_FORCE_THRESHOLD:
-                            time_diff = current_time - count_data[1]
-                            reason = f"Exceeded {BRUTE_FORCE_THRESHOLD} failed login attempts"
-                            if time_diff < 1.0:
+                        # Use lower threshold for high-velocity brute force
+                        effective_threshold = 3 if is_critical else BRUTE_FORCE_THRESHOLD
+                        if count_data[0] >= effective_threshold:
+                            if is_critical:
                                 reason = "High-Velocity Brute Force (Likely Hydra)"
+                            else:
+                                reason = f"Exceeded {BRUTE_FORCE_THRESHOLD} failed login attempts"
 
                             if block_ip(ip):
                                 send_block_event(ip, reason)
-                                ip_tracker[ip] = [0, current_time]  # Reset
+                                ip_tracker[ip] = [0, current_time]
+                                blocked_ips.add(ip)  # Stop processing further failures
 
                     last_line_content = line
 

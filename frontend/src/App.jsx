@@ -25,10 +25,8 @@ function App() {
         newLogEvents = await logRes.json();
       }
 
-      // 2. Sort Events
-      const allEvents = [...newLogEvents].sort((a, b) =>
-        new Date(b.timestamp) - new Date(a.timestamp)
-      );
+      // 2. Sort Events by id (preserves exact insertion order)
+      const allEvents = [...newLogEvents].sort((a, b) => b.id - a.id);
       setEvents(allEvents);
 
       // 3. Determine System Status

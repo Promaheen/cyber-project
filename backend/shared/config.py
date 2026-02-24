@@ -25,3 +25,14 @@ REQUEST_TIMEOUT = 5             # HTTP request timeout in seconds
 MAX_RETRIES = 3                 # Retry count for failed HTTP requests
 RETRY_DELAY = 1                 # Seconds between retries
 PROTECTED_IPS = ["127.0.0.1", "::1"]  # IPs that must never be blocked
+
+# Network Agent Thresholds
+NET_PORT_SCAN_THRESHOLD = 20     # Unique ports to flag as port scan
+NET_SYN_FLOOD_RATE = 100         # SYN packets/sec per IP to flag as SYN flood
+NET_ICMP_FLOOD_RATE = 100        # ICMP packets/sec per IP to flag as ping flood
+NET_UDP_FLOOD_RATE = 200         # UDP packets/sec per IP to flag as UDP flood
+NET_DDOS_SOURCE_THRESHOLD = 10   # Distinct source IPs hitting same port = distributed attack
+NET_WINDOW_SECONDS = 10          # Detection sliding window
+NET_BLOCK_DURATION = 120         # Seconds to block a DDoS attacker
+NET_PACKET_FLOOD_THRESHOLD = 500 # Total SYN packets from one IP in window
+

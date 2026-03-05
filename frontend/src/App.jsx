@@ -73,7 +73,7 @@ function App() {
     <Layout agents={activeAgents} selectedAgent={selectedAgent} setSelectedAgent={setSelectedAgent}>
       <header style={{ marginBottom: '2rem', borderBottom: '1px solid var(--border-glass)', paddingBottom: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'end' }}>
         <div>
-          <div className="text-neon" style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>// DASHBOARD</div>
+          {!selectedAgent && <div className="text-neon" style={{ fontSize: '0.9rem', marginBottom: '0.5rem' }}>// DASHBOARD</div>}
           <h2 className="animate-flicker" style={{ margin: 0, fontSize: '2rem', fontWeight: '300' }}>
             {selectedAgent ? `AGENT: ${selectedAgent}` : 'OVERVIEW'}
           </h2>
